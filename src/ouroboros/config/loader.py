@@ -33,18 +33,14 @@ Functions:
     get_opencode_cli_path: Get OpenCode CLI path from env var or config
 """
 
+import ast
 import os
 from pathlib import Path
 import stat
 from typing import Any
 
-from dotenv import load_dotenv
 from pydantic import ValidationError as PydanticValidationError
 import yaml
-
-# Load .env file from current directory and ~/.ouroboros/
-load_dotenv()  # Current directory .env
-load_dotenv(Path.home() / ".ouroboros" / ".env")  # Global .env
 
 from ouroboros.config.models import (  # noqa: E402
     CredentialsConfig,
@@ -66,6 +62,79 @@ _DEFAULT_CONSENSUS_MODELS = (
 _DEFAULT_CONSENSUS_ADVOCATE_MODEL = "openrouter/anthropic/claude-opus-4-6"
 _DEFAULT_CONSENSUS_DEVIL_MODEL = "openrouter/openai/gpt-4o"
 _DEFAULT_CONSENSUS_JUDGE_MODEL = "openrouter/google/gemini-2.5-pro"
+
+
+def _parse_env_value(raw_value: str) -> str:
+    candidate = raw_value.strip()
+    if not candidate:
+        return ""
+
+    if candidate[0] in {'"', "'"} and candidate[-1:] == candidate[0]:
+        try:
+            parsed = ast.literal_eval(candidate)
+        except (SyntaxError, ValueError):
+            return candidate[1:-1]
+        return str(parsed)
+
+    comment_index = candidate.find(" #")
+    if comment_index != -1:
+        candidate = candidate[:comment_index]
+    return candidate.rstrip()
+
+
+# Execution-sensitive settings must only come from trusted sources, never
+# from a project-directory .env that can travel with an untrusted repository.
+_UNTRUSTED_ENV_DENYLIST = frozenset(
+    {
+        # Explicit executable-path overrides, including provider aliases.
+        "OUROBOROS_CLI_PATH",
+        "OUROBOROS_CODEX_CLI_PATH",
+        "OUROBOROS_COPILOT_CLI_PATH",
+        "OUROBOROS_KIRO_CLI_PATH",
+        "OUROBOROS_OPENCODE_CLI_PATH",
+        "OUROBOROS_HERMES_CLI_PATH",
+        "OUROBOROS_GOOSE_CLI_PATH",
+        "OUROBOROS_GEMINI_CLI_PATH",
+        "OPENCODE_CLI_PATH",
+        # Runtime/backend selectors.
+        "OUROBOROS_AGENT_RUNTIME",
+        "OUROBOROS_RUNTIME",
+        "OUROBOROS_LLM_BACKEND",
+        # Permission-mode overrides.
+        "OUROBOROS_AGENT_PERMISSION_MODE",
+        "OUROBOROS_LLM_PERMISSION_MODE",
+        "OUROBOROS_OPENCODE_PERMISSION_MODE",
+    }
+)
+
+
+def _load_env_file(path: Path, *, trusted: bool = False) -> None:
+    if not path.exists():
+        return
+
+    for raw_line in path.read_text().splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[7:].lstrip()
+        if "=" not in line:
+            continue
+
+        key, raw_value = line.split("=", 1)
+        key = key.strip()
+        if not key or any(ch.isspace() for ch in key):
+            continue
+
+        if not trusted and key in _UNTRUSTED_ENV_DENYLIST:
+            continue
+
+        os.environ.setdefault(key, _parse_env_value(raw_value))
+
+
+# Resolve both paths before loading the untrusted project environment.
+for env_path, trusted in ((Path(".env"), False), (Path.home() / ".ouroboros" / ".env", True)):
+    _load_env_file(env_path, trusted=trusted)
 
 
 def ensure_config_dir() -> Path:
